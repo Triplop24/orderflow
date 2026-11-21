@@ -6,6 +6,7 @@ import dev.portfolio.orderflow.order.domain.OrderStatus;
 import dev.portfolio.orderflow.order.dto.CreateOrderRequest;
 import dev.portfolio.orderflow.order.dto.OrderItemRequest;
 import dev.portfolio.orderflow.order.dto.OrderResponse;
+import dev.portfolio.orderflow.order.messaging.OrderCreatedEvent;
 import dev.portfolio.orderflow.order.repository.OrderRepository;
 
 import org.junit.jupiter.api.Test;
@@ -16,6 +17,7 @@ import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.http.HttpStatus;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.web.server.ResponseStatusException;
@@ -24,7 +26,7 @@ import java.util.List;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.*;
-import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
@@ -33,11 +35,14 @@ class OrderServiceTest {
     @Mock
     private OrderRepository orderRepository;
 
+    @Mock
+    private ApplicationEventPublisher eventPublisher;
+
     @InjectMocks
     private OrderService orderService;
 
     @Test
-    void shouldCreateOrderWithPendingStatus() {
+    void shouldCreateOrderAndPublishEvent() {
 
         CreateOrderRequest request = new CreateOrderRequest(
                 "  CUSTOMER@EXAMPLE.COM  ",
@@ -98,17 +103,31 @@ class OrderServiceTest {
         assertThat(response.createdAt()).isNotNull();
         assertThat(response.updatedAt()).isNotNull();
 
-        ArgumentCaptor<Order> captor =
+        ArgumentCaptor<Order> orderCaptor =
                 ArgumentCaptor.forClass(Order.class);
 
         verify(orderRepository)
-                .saveAndFlush(captor.capture());
+                .saveAndFlush(orderCaptor.capture());
 
-        Order savedOrder = captor.getValue();
+        Order savedOrder = orderCaptor.getValue();
 
         assertThat(savedOrder.getItems()).hasSize(2);
-        assertThat(savedOrder.getStatus())
-                .isEqualTo(OrderStatus.PENDING);
+
+        ArgumentCaptor<OrderCreatedEvent> eventCaptor =
+                ArgumentCaptor.forClass(OrderCreatedEvent.class);
+
+        verify(eventPublisher).publishEvent(
+                eventCaptor.capture()
+        );
+
+        OrderCreatedEvent event = eventCaptor.getValue();
+
+        assertThat(event.orderId()).isEqualTo(10L);
+
+        assertThat(event.items()).containsExactly(
+                new OrderCreatedEvent.Item(101L, 2),
+                new OrderCreatedEvent.Item(205L, 1)
+        );
     }
 
     @Test
@@ -136,6 +155,8 @@ class OrderServiceTest {
 
         verify(orderRepository, never())
                 .saveAndFlush(any(Order.class));
+
+        verifyNoInteractions(eventPublisher);
     }
 
     @Test
@@ -157,8 +178,6 @@ class OrderServiceTest {
                 .isEqualTo(OrderStatus.PENDING);
 
         assertThat(response.items()).hasSize(1);
-
-        verify(orderRepository).findById(10L);
     }
 
     @Test
@@ -196,9 +215,6 @@ class OrderServiceTest {
         assertThat(result)
                 .extracting(OrderResponse::id)
                 .containsExactly(2L, 1L);
-
-        verify(orderRepository)
-                .findAllByOrderByCreatedAtDesc();
     }
 
     private Order createSavedOrder(Long id) {

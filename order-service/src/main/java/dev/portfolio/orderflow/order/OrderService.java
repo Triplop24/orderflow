@@ -4,8 +4,10 @@ import dev.portfolio.orderflow.order.domain.Order;
 import dev.portfolio.orderflow.order.dto.CreateOrderRequest;
 import dev.portfolio.orderflow.order.dto.OrderItemRequest;
 import dev.portfolio.orderflow.order.dto.OrderResponse;
+import dev.portfolio.orderflow.order.messaging.OrderCreatedEvent;
 import dev.portfolio.orderflow.order.repository.OrderRepository;
 
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -20,9 +22,14 @@ import java.util.Set;
 public class OrderService {
 
     private final OrderRepository orderRepository;
+    private final ApplicationEventPublisher eventPublisher;
 
-    public OrderService(OrderRepository orderRepository) {
+    public OrderService(
+            OrderRepository orderRepository,
+            ApplicationEventPublisher eventPublisher
+    ) {
         this.orderRepository = orderRepository;
+        this.eventPublisher = eventPublisher;
     }
 
     @Transactional
@@ -48,6 +55,22 @@ public class OrderService {
         }
 
         Order saved = orderRepository.saveAndFlush(order);
+
+        List<OrderCreatedEvent.Item> eventItems =
+                saved.getItems()
+                        .stream()
+                        .map(item -> new OrderCreatedEvent.Item(
+                                item.getProductId(),
+                                item.getQuantity()
+                        ))
+                        .toList();
+
+        eventPublisher.publishEvent(
+                new OrderCreatedEvent(
+                        saved.getId(),
+                        eventItems
+                )
+        );
 
         return OrderResponse.from(saved);
     }
