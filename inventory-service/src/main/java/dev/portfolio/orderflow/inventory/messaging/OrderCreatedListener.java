@@ -2,8 +2,7 @@ package dev.portfolio.orderflow.inventory.messaging;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 
-import dev.portfolio.orderflow.inventory.InventoryService;
-import dev.portfolio.orderflow.inventory.dto.ReserveInventoryRequest;
+import dev.portfolio.orderflow.inventory.OrderReservationService;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -11,9 +10,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Component;
-import org.springframework.web.server.ResponseStatusException;
 
-import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 @Component
@@ -25,16 +22,16 @@ public class OrderCreatedListener {
     private static final String INVENTORY_RESULT_TOPIC =
             "inventory-result";
 
-    private final InventoryService inventoryService;
+    private final OrderReservationService orderReservationService;
     private final KafkaTemplate<String, String> kafkaTemplate;
     private final ObjectMapper objectMapper;
 
     public OrderCreatedListener(
-            InventoryService inventoryService,
+            OrderReservationService orderReservationService,
             KafkaTemplate<String, String> kafkaTemplate,
             ObjectMapper objectMapper
     ) {
-        this.inventoryService = inventoryService;
+        this.orderReservationService = orderReservationService;
         this.kafkaTemplate = kafkaTemplate;
         this.objectMapper = objectMapper;
     }
@@ -52,47 +49,10 @@ public class OrderCreatedListener {
                 event.orderId()
         );
 
-        List<ReserveInventoryRequest.Item> items =
-                event.items()
-                        .stream()
-                        .map(item -> new ReserveInventoryRequest.Item(
-                                item.productId(),
-                                item.quantity()
-                        ))
-                        .toList();
+        // This transaction commits before the Kafka result is sent.
 
-        String status;
-        String reason = null;
-
-        try {
-            inventoryService.reserve(
-                    new ReserveInventoryRequest(items)
-            );
-
-            status = "RESERVED";
-
-            log.info(
-                    "Inventory reserved for order {}",
-                    event.orderId()
-            );
-
-        } catch (ResponseStatusException exception) {
-
-            status = "REJECTED";
-            reason = exception.getReason();
-
-            log.info(
-                    "Inventory rejected for order {}: {}",
-                    event.orderId(),
-                    reason
-            );
-        }
-
-        InventoryResultEvent result = new InventoryResultEvent(
-                event.orderId(),
-                status,
-                reason
-        );
+        InventoryResultEvent result =
+                orderReservationService.process(event);
 
         String resultPayload =
                 objectMapper.writeValueAsString(result);
@@ -106,7 +66,7 @@ public class OrderCreatedListener {
         log.info(
                 "Published InventoryResult for order {}: {}",
                 event.orderId(),
-                status
+                result.status()
         );
     }
 }
