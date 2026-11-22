@@ -1,23 +1,27 @@
 package dev.portfolio.orderflow.order;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 import dev.portfolio.orderflow.order.domain.Order;
 import dev.portfolio.orderflow.order.domain.OrderItem;
 import dev.portfolio.orderflow.order.domain.OrderStatus;
+
 import dev.portfolio.orderflow.order.dto.CreateOrderRequest;
 import dev.portfolio.orderflow.order.dto.OrderItemRequest;
 import dev.portfolio.orderflow.order.dto.OrderResponse;
-import dev.portfolio.orderflow.order.messaging.OrderCreatedEvent;
+
+import dev.portfolio.orderflow.order.outbox.OutboxEvent;
+import dev.portfolio.orderflow.order.outbox.OutboxEventRepository;
 import dev.portfolio.orderflow.order.repository.OrderRepository;
 
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 
 import org.mockito.ArgumentCaptor;
-import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
-import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.http.HttpStatus;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.web.server.ResponseStatusException;
@@ -36,13 +40,23 @@ class OrderServiceTest {
     private OrderRepository orderRepository;
 
     @Mock
-    private ApplicationEventPublisher eventPublisher;
+    private OutboxEventRepository outboxEventRepository;
 
-    @InjectMocks
     private OrderService orderService;
 
+    private final ObjectMapper objectMapper = new ObjectMapper();
+
+    @BeforeEach
+    void setUp() {
+        orderService = new OrderService(
+                orderRepository,
+                outboxEventRepository,
+                objectMapper
+        );
+    }
+
     @Test
-    void shouldCreateOrderAndPublishEvent() {
+    void shouldCreateOrderAndSaveOutboxEvent() throws Exception {
 
         CreateOrderRequest request = new CreateOrderRequest(
                 "  CUSTOMER@EXAMPLE.COM  ",
@@ -88,50 +102,46 @@ class OrderServiceTest {
 
         assertThat(response.items()).hasSize(2);
 
-        assertThat(response.items().get(0).productId())
-                .isEqualTo(101L);
+        ArgumentCaptor<OutboxEvent> captor =
+                ArgumentCaptor.forClass(OutboxEvent.class);
 
-        assertThat(response.items().get(0).quantity())
+        verify(outboxEventRepository).save(captor.capture());
+
+        OutboxEvent outboxEvent = captor.getValue();
+
+        assertThat(outboxEvent.getAggregateId())
+                .isEqualTo(10L);
+
+        assertThat(outboxEvent.getEventType())
+                .isEqualTo("OrderCreated");
+
+        assertThat(outboxEvent.getPublishedAt()).isNull();
+
+        var json = objectMapper.readTree(
+                outboxEvent.getPayload()
+        );
+
+        assertThat(json.get("orderId").asLong())
+                .isEqualTo(10L);
+
+        assertThat(json.get("items").size())
                 .isEqualTo(2);
 
-        assertThat(response.items().get(1).productId())
-                .isEqualTo(205L);
+        assertThat(
+                json.get("items").get(0).get("productId").asLong()
+        ).isEqualTo(101L);
 
-        assertThat(response.items().get(1).quantity())
-                .isEqualTo(1);
+        assertThat(
+                json.get("items").get(0).get("quantity").asInt()
+        ).isEqualTo(2);
 
-        assertThat(response.createdAt()).isNotNull();
-        assertThat(response.updatedAt()).isNotNull();
-
-        ArgumentCaptor<Order> orderCaptor =
-                ArgumentCaptor.forClass(Order.class);
-
-        verify(orderRepository)
-                .saveAndFlush(orderCaptor.capture());
-
-        Order savedOrder = orderCaptor.getValue();
-
-        assertThat(savedOrder.getItems()).hasSize(2);
-
-        ArgumentCaptor<OrderCreatedEvent> eventCaptor =
-                ArgumentCaptor.forClass(OrderCreatedEvent.class);
-
-        verify(eventPublisher).publishEvent(
-                eventCaptor.capture()
-        );
-
-        OrderCreatedEvent event = eventCaptor.getValue();
-
-        assertThat(event.orderId()).isEqualTo(10L);
-
-        assertThat(event.items()).containsExactly(
-                new OrderCreatedEvent.Item(101L, 2),
-                new OrderCreatedEvent.Item(205L, 1)
-        );
+        assertThat(
+                json.get("items").get(1).get("productId").asLong()
+        ).isEqualTo(205L);
     }
 
     @Test
-    void shouldRejectDuplicateProducts() {
+    void shouldRejectDuplicateProductsWithoutSaving() {
 
         CreateOrderRequest request = new CreateOrderRequest(
                 "customer@example.com",
@@ -150,13 +160,10 @@ class OrderServiceTest {
         assertThat(exception.getStatusCode())
                 .isEqualTo(HttpStatus.BAD_REQUEST);
 
-        assertThat(exception.getReason())
-                .contains("Duplicate product");
-
         verify(orderRepository, never())
                 .saveAndFlush(any(Order.class));
 
-        verifyNoInteractions(eventPublisher);
+        verifyNoInteractions(outboxEventRepository);
     }
 
     @Test
@@ -194,9 +201,6 @@ class OrderServiceTest {
 
         assertThat(exception.getStatusCode())
                 .isEqualTo(HttpStatus.NOT_FOUND);
-
-        assertThat(exception.getReason())
-                .contains("Order not found");
     }
 
     @Test

@@ -1,15 +1,20 @@
 package dev.portfolio.orderflow.order.messaging;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.portfolio.orderflow.order.outbox.OutboxEvent;
+import dev.portfolio.orderflow.order.outbox.OutboxEventRepository;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.event.TransactionPhase;
-import org.springframework.transaction.event.TransactionalEventListener;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.util.List;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 @Component
 public class OrderCreatedPublisher {
@@ -17,65 +22,73 @@ public class OrderCreatedPublisher {
     private static final Logger log =
             LoggerFactory.getLogger(OrderCreatedPublisher.class);
 
+    private static final int BATCH_SIZE = 20;
+
+    private final OutboxEventRepository outboxEventRepository;
     private final KafkaTemplate<String, String> kafkaTemplate;
-    private final ObjectMapper objectMapper;
 
     public OrderCreatedPublisher(
-            KafkaTemplate<String, String> kafkaTemplate,
-            ObjectMapper objectMapper
+            OutboxEventRepository outboxEventRepository,
+            KafkaTemplate<String, String> kafkaTemplate
     ) {
+        this.outboxEventRepository = outboxEventRepository;
         this.kafkaTemplate = kafkaTemplate;
-        this.objectMapper = objectMapper;
     }
 
-    @TransactionalEventListener(
-            phase = TransactionPhase.AFTER_COMMIT
+    @Scheduled(
+            fixedDelayString =
+                    "${orderflow.outbox.poll-interval-ms:1000}"
     )
-    public void publish(OrderCreatedEvent event) {
+    @Transactional
+    public void publishPending() {
 
-        String payload;
+        List<OutboxEvent> events =
+                outboxEventRepository.findPendingForUpdate(
+                        BATCH_SIZE
+                );
 
-        try {
-            payload = objectMapper.writeValueAsString(event);
+        for (OutboxEvent event : events) {
 
-        } catch (JsonProcessingException ex) {
-            log.error(
-                    "Failed to serialize OrderCreated event for order {}",
-                    event.orderId(),
-                    ex
-            );
-            return;
-        }
+            if (!"OrderCreated".equals(event.getEventType())) {
+                throw new IllegalStateException(
+                        "Unsupported outbox event type: "
+                                + event.getEventType()
+                );
+            }
 
-        try {
-            kafkaTemplate.send(
-                    KafkaTopicConfig.ORDER_CREATED_TOPIC,
-                    event.orderId().toString(),
-                    payload
-            ).whenComplete((result, error) -> {
+            try {
+                kafkaTemplate.send(
+                        KafkaTopicConfig.ORDER_CREATED_TOPIC,
+                        event.getAggregateId().toString(),
+                        event.getPayload()
+                ).get(10, TimeUnit.SECONDS);
 
-                if (error != null) {
-                    log.error(
-                            "Failed to publish OrderCreated for order {}",
-                            event.orderId(),
-                            error
-                    );
-                    return;
-                }
+                event.markPublished();
 
                 log.info(
-                        "Published OrderCreated for order {} to topic {}",
-                        event.orderId(),
-                        KafkaTopicConfig.ORDER_CREATED_TOPIC
+                        "Published outbox event {} for order {}",
+                        event.getId(),
+                        event.getAggregateId()
                 );
-            });
 
-        } catch (Exception ex) {
-            log.error(
-                    "Failed to initiate Kafka send for order {}",
-                    event.orderId(),
-                    ex
-            );
+            } catch (InterruptedException ex) {
+
+                Thread.currentThread().interrupt();
+
+                throw new IllegalStateException(
+                        "Interrupted while publishing outbox event "
+                                + event.getId(),
+                        ex
+                );
+
+            } catch (ExecutionException | TimeoutException ex) {
+
+                throw new IllegalStateException(
+                        "Failed to publish outbox event "
+                                + event.getId(),
+                        ex
+                );
+            }
         }
     }
 }

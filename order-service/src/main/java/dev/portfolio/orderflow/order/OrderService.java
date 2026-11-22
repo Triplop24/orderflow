@@ -1,13 +1,17 @@
 package dev.portfolio.orderflow.order;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 import dev.portfolio.orderflow.order.domain.Order;
 import dev.portfolio.orderflow.order.dto.CreateOrderRequest;
 import dev.portfolio.orderflow.order.dto.OrderItemRequest;
 import dev.portfolio.orderflow.order.dto.OrderResponse;
 import dev.portfolio.orderflow.order.messaging.OrderCreatedEvent;
+import dev.portfolio.orderflow.order.outbox.OutboxEvent;
+import dev.portfolio.orderflow.order.outbox.OutboxEventRepository;
 import dev.portfolio.orderflow.order.repository.OrderRepository;
 
-import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -22,14 +26,17 @@ import java.util.Set;
 public class OrderService {
 
     private final OrderRepository orderRepository;
-    private final ApplicationEventPublisher eventPublisher;
+    private final OutboxEventRepository outboxEventRepository;
+    private final ObjectMapper objectMapper;
 
     public OrderService(
             OrderRepository orderRepository,
-            ApplicationEventPublisher eventPublisher
+            OutboxEventRepository outboxEventRepository,
+            ObjectMapper objectMapper
     ) {
         this.orderRepository = orderRepository;
-        this.eventPublisher = eventPublisher;
+        this.outboxEventRepository = outboxEventRepository;
+        this.objectMapper = objectMapper;
     }
 
     @Transactional
@@ -65,12 +72,30 @@ public class OrderService {
                         ))
                         .toList();
 
-        eventPublisher.publishEvent(
-                new OrderCreatedEvent(
-                        saved.getId(),
-                        eventItems
-                )
+        OrderCreatedEvent event = new OrderCreatedEvent(
+                saved.getId(),
+                eventItems
         );
+
+        String payload;
+
+        try {
+            payload = objectMapper.writeValueAsString(event);
+
+        } catch (JsonProcessingException ex) {
+            throw new IllegalStateException(
+                    "Failed to serialize OrderCreated event",
+                    ex
+            );
+        }
+
+        OutboxEvent outboxEvent = new OutboxEvent(
+                saved.getId(),
+                "OrderCreated",
+                payload
+        );
+
+        outboxEventRepository.save(outboxEvent);
 
         return OrderResponse.from(saved);
     }
